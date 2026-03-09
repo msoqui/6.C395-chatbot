@@ -1,5 +1,44 @@
 # MIT Course Catalog Chatbot — Implementation Plan
 
+---
+
+## Implementation Progress
+
+### Completed
+
+**Scraper (`src/scraper.py`)** ✓
+- Scrapes all 47 MIT department catalog pages from `student.mit.edu/catalog`
+- Event-based DOM walker (depth-first) correctly parses the flat HTML structure
+- Extracts: course number, title, units, prereqs, attributes, description
+- All requirement icons mapped: REST, HASS-H/A/S/AH/E, CI-H, CI-M, Institute-Lab, not-offered flags
+- Deduplicates joint courses (e.g. `6.1200[J]` appearing in multiple depts)
+- Output: `data/courses.json` — **3,120 courses, 100% with descriptions**
+- Key finding: one `hr.gif` per course separates metadata from description (no leading hr.gif)
+
+**Retriever (`src/retriever.py`)** ✓
+- Embeds all 3,120 courses using `sentence-transformers/all-MiniLM-L6-v2`
+- Builds FAISS index with cosine similarity (`IndexFlatIP` + L2 normalization)
+- Caches index to `data/course_index.faiss` — loads in <1s on subsequent runs
+- Smoke-tested with 3 queries; retrieval quality confirmed correct
+- Exposes `retrieve(query, k=5) → list[str]` for use in chat
+
+**Chat (`src/chat.py`)** ✓
+- `format_prompt`: retrieves top-5 courses, injects into system prompt, appends full history
+- `get_response`: calls `client.chat_completion()` with messages format (Llama 3.1 compatible)
+- Multi-turn memory via conversation history passthrough
+
+**App (`app.py`)** ✓
+- Gradio `ChatInterface` with MIT-appropriate title, description, and example questions
+- Handles both Gradio 3 (list of pairs) and Gradio 5 (list of dicts) history formats
+
+### Remaining
+- Test locally end-to-end (`python app.py`)
+- Deploy to HuggingFace Spaces
+- Add `HF_TOKEN` secret to Space settings
+- Evaluation (accuracy, hallucination rate, constraint reasoning, conversation continuity)
+
+---
+
 ## Goal
 Build a conversational chatbot that helps MIT students navigate the course catalog. Students describe their situation (major, year, requirements needed, interests, schedule constraints) and receive accurate, personalized course recommendations.
 

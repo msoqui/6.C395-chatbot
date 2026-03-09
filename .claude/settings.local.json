@@ -8,7 +8,8 @@
       "Read(//Users/msoqui/anaconda3/**)",
       "Read(//Users/msoqui/miniconda3/**)",
       "Read(//opt/**)",
-      "Bash(/opt/anaconda3/bin/python3:*)"
+      "Bash(/opt/anaconda3/bin/python3:*)",
+      "Bash(/opt/anaconda3/bin/pip install:*)"
     ]
   }
 }
