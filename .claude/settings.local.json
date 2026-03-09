@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:student.mit.edu)",
+      "Bash(source:*)",
+      "Bash(python3:*)",
+      "Read(//Users/msoqui/miniforge3/**)",
+      "Read(//Users/msoqui/anaconda3/**)",
+      "Read(//Users/msoqui/miniconda3/**)",
+      "Read(//opt/**)",
+      "Bash(/opt/anaconda3/bin/python3:*)"
+    ]
+  }
+}
