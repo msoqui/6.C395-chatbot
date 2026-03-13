@@ -23,15 +23,22 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 
 BASE_URL = "https://student.mit.edu/catalog/"
 
-DEPARTMENTS = [
-    "m1a", "m2a", "m3a", "m4a", "m5a", "m6a", "m7a", "m8a", "m9a",
-    "m10a", "m11a", "m12a", "m14a", "m15a", "m16a", "m17a", "m18a",
-    "m20a", "m21a", "m21Aa", "mCMSa", "m21Wa", "m21Ga", "m21Ha",
-    "m21La", "m21Ma", "m21Ta", "mWGSa", "m22a", "m24a", "mCCa",
-    "mCGa", "mCSBa", "mCSEa", "mECa", "mEMa", "mESa", "mHSTa",
-    "mIDSa", "mMASa", "mSCMa", "mASa", "mMSa", "mNSa", "mSTSa",
-    "mSWEa", "mSPa",
+DEPT_PREFIXES = [
+    "m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9",
+    "m10", "m11", "m12", "m14", "m15", "m16", "m17", "m18",
+    "m20", "m21", "m21A", "mCMS", "m21W", "m21G", "m21H",
+    "m21L", "m21M", "m21T", "mWGS", "m22", "m24", "mCC",
+    "mCG", "mCSB", "mCSE", "mEC", "mEM", "mES", "mHST",
+    "mIDS", "mMAS", "mSCM", "mAS", "mMS", "mNS", "mSTS",
+    "mSWE", "mSP",
 ]
+
+
+def all_dept_pages():
+    """Yield all department page slugs by auto-discovering a/b/c/... sub-pages."""
+    for prefix in DEPT_PREFIXES:
+        for letter in "abcdefghij":
+            yield prefix + letter
 
 # Maps icon filename → human-readable attribute label.
 # Confirmed by inspecting m6a, m24a, m21a, m21Aa, m21Ma pages.
@@ -199,27 +206,37 @@ def scrape_all(output_path='data/courses.json', delay=0.5):
     seen_numbers = set()
     failed_depts = []
 
-    for dept in DEPARTMENTS:
+    current_prefix = None
+    for dept in all_dept_pages():
+        # Detect when we move to a new department prefix
+        prefix = dept[:-1]
+        if prefix != current_prefix:
+            current_prefix = prefix
+
         url = f"{BASE_URL}{dept}.html"
-        print(f"Scraping {dept}...", end=' ', flush=True)
         try:
             resp = requests.get(url, timeout=20, headers={'User-Agent': 'Mozilla/5.0'})
+            if resp.status_code == 404:
+                continue  # This sub-page doesn't exist, try the next letter
             resp.raise_for_status()
-            courses = parse_department_page(resp.text)
-
-            added = 0
-            for course in courses:
-                num = course['number']
-                if num not in seen_numbers:
-                    seen_numbers.add(num)
-                    all_courses.append(course)
-                    added += 1
-
-            print(f"{added} new courses (running total: {len(all_courses)})")
+        except requests.HTTPError:
+            continue
         except Exception as e:
-            print(f"FAILED — {e}")
+            print(f"  {dept}: FAILED — {e}")
             failed_depts.append(dept)
+            time.sleep(delay)
+            continue
 
+        courses = parse_department_page(resp.text)
+        added = 0
+        for course in courses:
+            num = course['number']
+            if num not in seen_numbers:
+                seen_numbers.add(num)
+                all_courses.append(course)
+                added += 1
+
+        print(f"  {dept}: {added} new courses (total: {len(all_courses)})")
         time.sleep(delay)
 
     # --- Write output ---

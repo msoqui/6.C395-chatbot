@@ -1,3 +1,4 @@
+import ast
 import re
 from huggingface_hub import InferenceClient
 from config import BASE_MODEL, MY_MODEL, HF_TOKEN
@@ -27,8 +28,8 @@ class Chatbot:
 
         # Use fewer results when asking about specific courses (less noise),
         # more results for broad recommendation queries.
-        mentioned = re.findall(r'\b\d+\.\d+[A-Za-z]?\b', retrieval_query)
-        k = max(6, len(mentioned) * 2) if mentioned else 12
+        mentioned = re.findall(r'\b\d+[A-Za-z]*\.[A-Za-z0-9]+(?:\[J\])?\b', retrieval_query)
+        k = max(10, len(mentioned) * 6) if mentioned else 12
 
         courses = self.retriever.retrieve(retrieval_query, k=k)
         course_context = "\n\n".join(courses) if courses else "No course data retrieved."
@@ -49,4 +50,13 @@ class Chatbot:
             max_tokens=1024,
             temperature=0.2,
         )
-        return response.choices[0].message.content.strip()
+        content = response.choices[0].message.content
+        if isinstance(content, list):
+            content = " ".join(block.get("text", "") for block in content if isinstance(block, dict))
+        elif isinstance(content, str) and content.startswith("[{"):
+            # API sometimes returns a stringified list of content blocks.
+            # Use regex to extract all 'text' values — robust to apostrophes.
+            texts = re.findall(r"'text':\s*'(.*?)'(?=\s*,\s*'type')", content, re.DOTALL)
+            if texts:
+                content = " ".join(texts)
+        return content.replace('\\n', '\n').strip()

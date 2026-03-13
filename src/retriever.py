@@ -35,16 +35,30 @@ ATTRIBUTE_PATTERNS = {
 HASS_ATTRS = {"HASS-H", "HASS-A", "HASS-S", "HASS-E", "HASS-AH"}
 
 
-def _course_to_text(course: dict) -> str:
+def _build_reverse_prereqs(courses: list) -> dict:
+    """Map each course number to the list of courses that require it."""
+    reverse = {}
+    for c in courses:
+        prereq_str = c.get("prereqs") or ""
+        # Extract all course numbers mentioned in the prereq string
+        for num in re.findall(r'\b\d+[A-Za-z]*\.[A-Za-z0-9]+(?:\[J\])?\b', prereq_str):
+            reverse.setdefault(num.upper(), []).append(c["number"])
+    return reverse
+
+
+def _course_to_text(course: dict, required_by: list = None) -> str:
     """Text blob used for embedding — richer = better retrieval."""
     attrs = ", ".join(course.get("attributes", []))
-    return (
+    text = (
         f"{course['number']} {course['title']}. "
         f"Units: {course.get('units', '')}. "
         f"Prereqs: {course.get('prereqs', 'None')}. "
         f"Attributes: {attrs}. "
         f"{course.get('description', '')}"
-    ).strip()
+    )
+    if required_by:
+        text += f" Students who complete this course can go on to take: {', '.join(required_by)}."
+    return text.strip()
 
 
 class Retriever:
@@ -53,8 +67,19 @@ class Retriever:
         with open(data_path, encoding="utf-8") as f:
             self.courses = json.load(f)
 
-        self.texts = [_course_to_text(c) for c in self.courses]
-        self.course_by_number = {c["number"].upper(): i for i, c in enumerate(self.courses)}
+        reverse_prereqs = _build_reverse_prereqs(self.courses)
+        self.texts = [
+            _course_to_text(c, required_by=reverse_prereqs.get(c["number"].upper()))
+            for c in self.courses
+        ]
+        # Index by normalized number: uppercase, brackets/suffixes stripped.
+        # This lets "18.C06" match "18.C06[J]", "6.1200" match "6.1200[J]", etc.
+        self.course_by_number = {}
+        for i, c in enumerate(self.courses):
+            for key in self._number_variants(c["number"]):
+                self.course_by_number.setdefault(key, i)
+        # Index of courses that require each course number (for follow-on lookups)
+        self.required_by = reverse_prereqs
 
         print(f"Loading embedding model ({MODEL_NAME})...")
         self.model = SentenceTransformer(MODEL_NAME)
@@ -73,6 +98,15 @@ class Retriever:
             print(f"Index saved to {index_path}")
 
         print(f"Retriever ready ({len(self.courses)} courses indexed).")
+
+    def _number_variants(self, number: str) -> list[str]:
+        """Return lookup keys for a course number (handles [J], case, whitespace)."""
+        base = number.upper().strip()
+        variants = [base]
+        stripped = re.sub(r'\[.*?\]', '', base).strip()
+        if stripped != base:
+            variants.append(stripped)
+        return variants
 
     def _format_course(self, c: dict) -> str:
         attrs = ", ".join(c.get("attributes", []))
@@ -121,12 +155,21 @@ class Retriever:
         seen = set()
 
         # Step 1: exact course number matches (guaranteed)
-        mentioned = re.findall(r'\b(\d+\.\d+[A-Za-z]?)\b', query)
+        mentioned = re.findall(r'\b(\d+[A-Za-z]*\.[A-Za-z0-9]+)(?:\[J\])?\b', query)
         for num in mentioned:
-            idx = self.course_by_number.get(num.upper())
+            idx = self.course_by_number.get(re.sub(r'\[.*?\]', '', num.upper()).strip())
             if idx is not None and idx not in seen:
                 results.append(self._format_course(self.courses[idx]))
                 seen.add(idx)
+
+        # Step 1b: also retrieve courses that require any mentioned course number
+        # (makes "what to take after X" and "what requires X" answerable)
+        for num in mentioned:
+            for follow_on in self.required_by.get(num.upper(), [])[:5]:
+                idx = self.course_by_number.get(follow_on.upper())
+                if idx is not None and idx not in seen:
+                    results.append(self._format_course(self.courses[idx]))
+                    seen.add(idx)
 
         remaining = k - len(results)
         if remaining <= 0:
