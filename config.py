@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-BASE_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+BASE_MODEL = "meta-llama/Llama-3.3-70B-Instruct"
 # Other options:
 # MODEL = "HuggingFaceTB/SmolLM3-3B"
 # MODEL = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"

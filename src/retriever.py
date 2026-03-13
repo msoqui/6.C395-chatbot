@@ -1,30 +1,42 @@
 """
-src/retriever.py — FAISS-based course retriever
+src/retriever.py — FAISS-based course retriever with attribute/department pre-filtering
 
-Loads data/courses.json, embeds all courses with a small sentence-transformer,
-builds a FAISS index, and exposes retrieve(query, k) for use in chat.py.
-
-The index is built once at startup and cached for the lifetime of the process.
-On a HuggingFace CPU Space this takes ~10-20 seconds on first load.
+Retrieval strategy per query:
+1. Exact-match any course numbers mentioned (guaranteed inclusion)
+2. Broad semantic search over the full pre-built FAISS index
+3. Post-filter results by attributes (CI-H, HASS-*, REST), no-prereqs constraint
+4. Dept prefix (e.g. "Course 6") is a soft preference: fills half the slots first
+5. Merge exact matches + filtered semantic results, cap at k
 """
 
 import json
 import os
+import re
 
 import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"  # ~80MB, fast on CPU
+MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 DATA_PATH  = os.path.join(os.path.dirname(__file__), "..", "data", "courses.json")
 INDEX_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "course_index.faiss")
 
+ATTRIBUTE_PATTERNS = {
+    "CI-H":          [r'\bci-h\b', r'\bci h\b', r'\bcommunication intensive\b', r'\bcomm intensive\b'],
+    "CI-M":          [r'\bci-m\b', r'\bci m\b'],
+    "HASS-H":        [r'\bhass-h\b', r'\bhass h\b', r'\bhumanities\b'],
+    "HASS-A":        [r'\bhass-a\b', r'\bhass a\b', r'\barts\b'],
+    "HASS-S":        [r'\bhass-s\b', r'\bhass s\b', r'\bsocial science\b'],
+    "HASS-E":        [r'\bhass-e\b', r'\bhass e\b'],
+    "HASS-AH":       [r'\bhass-ah\b', r'\bhass ah\b'],
+    "REST":          [r'\brest\b', r'\bscience requirement\b'],
+    "Institute-Lab": [r'\binstitute.?lab\b', r'\blab requirement\b'],
+}
+HASS_ATTRS = {"HASS-H", "HASS-A", "HASS-S", "HASS-E", "HASS-AH"}
+
 
 def _course_to_text(course: dict) -> str:
-    """
-    Convert a course dict to a single searchable text blob.
-    This is what gets embedded — richer text = better retrieval.
-    """
+    """Text blob used for embedding — richer = better retrieval."""
     attrs = ", ".join(course.get("attributes", []))
     return (
         f"{course['number']} {course['title']}. "
@@ -42,6 +54,7 @@ class Retriever:
             self.courses = json.load(f)
 
         self.texts = [_course_to_text(c) for c in self.courses]
+        self.course_by_number = {c["number"].upper(): i for i, c in enumerate(self.courses)}
 
         print(f"Loading embedding model ({MODEL_NAME})...")
         self.model = SentenceTransformer(MODEL_NAME)
@@ -50,59 +63,126 @@ class Retriever:
             print("Loading cached FAISS index...")
             self.index = faiss.read_index(index_path)
         else:
-            print(f"Building FAISS index over {len(self.texts)} courses (one-time cost)...")
-            embeddings = self.model.encode(self.texts, show_progress_bar=True, batch_size=64)
-            embeddings = np.array(embeddings, dtype="float32")
-            faiss.normalize_L2(embeddings)  # cosine similarity via inner product
-
+            print(f"Building FAISS index over {len(self.texts)} courses (one-time)...")
+            embeddings = np.array(self.model.encode(self.texts, show_progress_bar=True, batch_size=64), dtype="float32")
+            faiss.normalize_L2(embeddings)
             self.index = faiss.IndexFlatIP(embeddings.shape[1])
             self.index.add(embeddings)
-
             os.makedirs(os.path.dirname(index_path), exist_ok=True)
             faiss.write_index(self.index, index_path)
             print(f"Index saved to {index_path}")
 
         print(f"Retriever ready ({len(self.courses)} courses indexed).")
 
-    def retrieve(self, query: str, k: int = 5) -> list[str]:
+    def _format_course(self, c: dict) -> str:
+        attrs = ", ".join(c.get("attributes", []))
+        prereq = (c.get("prereqs") or "None").strip()
+        prereq_is_none = prereq.lower() in ("none", "")
+        level = "Entry-level (no prerequisites)" if prereq_is_none else "Requires prior coursework — must complete prerequisites first"
+        return (
+            f"Course {c['number']}: {c['title']}\n"
+            f"  LEVEL: {level}\n"
+            f"  Prerequisites: {prereq}\n"
+            f"  Units: {c.get('units', 'N/A')} | Attributes: {attrs}\n"
+            f"  Description: {c.get('description', '')}"
+        )
+
+    def _extract_filters(self, query: str):
         """
-        Return the top-k most relevant course text blobs for a given query.
-        These are injected directly into the LLM prompt.
+        Returns (required_attrs, dept_prefix, no_prereqs).
+        dept_prefix only set on explicit "course N" mentions, not bare course numbers.
         """
+        q = query.lower()
+
+        required_attrs = set()
+        if re.search(r'\bhass\b', q):
+            required_attrs |= HASS_ATTRS
+        for attr, patterns in ATTRIBUTE_PATTERNS.items():
+            if any(re.search(p, q) for p in patterns):
+                required_attrs.add(attr)
+
+        dept_prefix = None
+        dept_match = re.search(r'\bcourse\s+(\d+)\b', q)
+        if dept_match:
+            dept_prefix = dept_match.group(1) + "."
+
+        no_prereqs = bool(re.search(r'\bno\s+pre\w*\b|\bwithout\s+pre\w*\b', q))
+
+        return required_attrs, dept_prefix, no_prereqs
+
+    def retrieve(self, query: str, k: int = 10) -> list[str]:
+        """
+        Return the top-k most relevant formatted course strings.
+
+        Uses the pre-built FAISS index for all semantic search — no re-encoding
+        of course texts at query time.
+        """
+        results = []
+        seen = set()
+
+        # Step 1: exact course number matches (guaranteed)
+        mentioned = re.findall(r'\b(\d+\.\d+[A-Za-z]?)\b', query)
+        for num in mentioned:
+            idx = self.course_by_number.get(num.upper())
+            if idx is not None and idx not in seen:
+                results.append(self._format_course(self.courses[idx]))
+                seen.add(idx)
+
+        remaining = k - len(results)
+        if remaining <= 0:
+            return results
+
+        # Step 2: extract filters
+        required_attrs, dept_prefix, no_prereqs = self._extract_filters(query)
+
+        # Step 3: broad semantic search over the full pre-built index
         query_vec = np.array(self.model.encode([query]), dtype="float32")
         faiss.normalize_L2(query_vec)
+        search_n = min(k * 15, len(self.courses))  # cast a wide net, then filter
+        _, raw_indices = self.index.search(query_vec, search_n)
 
-        _, indices = self.index.search(query_vec, k)
+        # Step 4: post-filter and split into dept-preferred vs rest
+        preferred, others = [], []
+        for idx in raw_indices[0]:
+            if idx in seen or idx >= len(self.courses):
+                continue
+            c = self.courses[idx]
+            attrs = set(c.get("attributes", []))
+            prereq = (c.get("prereqs") or "None").strip()
 
-        results = []
-        for idx in indices[0]:
-            if idx < len(self.courses):
-                c = self.courses[idx]
-                attrs = ", ".join(c.get("attributes", []))
-                results.append(
-                    f"Course {c['number']}: {c['title']}\n"
-                    f"  Units: {c.get('units', 'N/A')} | "
-                    f"Prereqs: {c.get('prereqs', 'None')} | "
-                    f"Attributes: {attrs}\n"
-                    f"  {c.get('description', '')}"
-                )
+            if required_attrs and not (required_attrs & attrs):
+                continue
+            if no_prereqs and prereq.lower() not in ("none", ""):
+                continue
+
+            if dept_prefix and c["number"].startswith(dept_prefix):
+                preferred.append(idx)
+            else:
+                others.append(idx)
+
+        # Dept is a soft preference: fill up to half slots from preferred dept
+        if dept_prefix and preferred:
+            half = max(remaining // 2, 1)
+            ordered = preferred[:half] + others[:remaining]
+        else:
+            ordered = (preferred + others)
+
+        for idx in ordered[:remaining]:
+            if idx not in seen:
+                results.append(self._format_course(self.courses[idx]))
+                seen.add(idx)
+
         return results
 
 
 if __name__ == "__main__":
-    # Quick smoke test
     r = Retriever()
-    print("\n--- Test query: 'ethics and moral philosophy' ---")
-    for hit in r.retrieve("ethics and moral philosophy", k=3):
-        print(hit)
-        print()
-
-    print("--- Test query: 'machine learning with math prereqs' ---")
-    for hit in r.retrieve("machine learning with math prereqs", k=3):
-        print(hit)
-        print()
-
-    print("--- Test query: 'HASS social science about culture' ---")
-    for hit in r.retrieve("HASS social science about culture", k=3):
-        print(hit)
-        print()
+    for label, q in [
+        ("CI-H ethics", "CI-H courses about ethics"),
+        ("Course 6 ML", "Course 6 machine learning"),
+        ("HASS-S no prereqs", "HASS-S courses with no prerequisites"),
+        ("specific lookup", "What is 6.1010?"),
+    ]:
+        print(f"\n--- {label} ---")
+        for hit in r.retrieve(q, k=5):
+            print(hit); print()

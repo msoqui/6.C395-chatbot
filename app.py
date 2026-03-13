@@ -24,14 +24,19 @@ def create_chatbot():
         pairs = []
         if history:
             if isinstance(history[0], dict):
-                # Gradio 5: history is a flat list of {"role": ..., "content": ...} dicts
+                # Gradio 5: flat list of {"role": ..., "content": ...} dicts
                 for i in range(0, len(history) - 1, 2):
-                    u = history[i].get("content", "")
+                    u = history[i].get("content", "") or ""
                     a = history[i + 1].get("content", "") if i + 1 < len(history) else ""
+                    if not isinstance(u, str): u = str(u)
+                    if not isinstance(a, str): a = str(a)
                     pairs.append((u, a))
             else:
-                # Gradio 3/4: history is a list of [user, assistant] pairs
-                pairs = [(h[0], h[1]) for h in history]
+                # Gradio 3/4: list of [user, assistant] pairs
+                for h in history:
+                    u = h[0] if isinstance(h[0], str) else str(h[0] or "")
+                    a = h[1] if isinstance(h[1], str) else str(h[1] or "")
+                    pairs.append((u, a))
 
         return chatbot.get_response(message, pairs)
 
