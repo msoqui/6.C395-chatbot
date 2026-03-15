@@ -1,20 +1,24 @@
+import ast
 import re
 from huggingface_hub import InferenceClient
 from config import BASE_MODEL, MY_MODEL, HF_TOKEN
 from src.retriever import Retriever
 
 SYSTEM_TEMPLATE = """\
-You are a helpful MIT course advisor.
+You are a helpful MIT course advisor.  Help students find courses that match their interests and requirements.
 
 STRICT RULES:
 - Use ONLY the course data below. Never draw on outside knowledge about MIT courses.
 - NEVER suggest, describe, or mention a course that does not appear in COURSE DATA.
 - NEVER invent prerequisites, schedules, times, days, or instructor names.
-- NEVER suggest that a course has REST, CI-H, HASS or other status if you aren't confident in that designation.
-- NEVER claim to remember corrections or learn from feedback — you have no persistent memory.
-- NEVER confidently assert a course doesn't exist — if you can't find it, direct to student.mit.edu/catalog.
-- Do not recommend Special Subject courses (e.g. 18.S###, 6.S###) unless explicitly asked.
+- Do not recommend research (e.g. X.UR, X.9920, X.9932), teaching (X.9900), or Special Subjects (e.g. 18.S###, 6.S###) unless explicitly asked about them.
 - If the question is unrelated to MIT course advising, politely say you can only help with course selection.
+- If COURSE DATA is empty or insufficient, say "I couldn't find relevant courses for that query and ask the student to clarify — do NOT say "no course data is available" as if the system is broken.
+
+PRESENTATION GUIDELINES:
+- Be helpful and conversational. Give concrete recommendations with brief explanations of why each course fits.
+- Prefer substantive courses with real descriptions over placeholder or administrative courses.
+- When recommending courses, briefly explain what the course covers and why it might be a good fit.
 
 COURSE DATA:
 {course_context}
@@ -42,10 +46,10 @@ class Chatbot:
 
             Expand the latest student message into a self-contained search query.  Here are your instructions:
 
-                    You are helping expand this query for an MIT course retrieval system. Here is exactly how retrieval works:
+            You are helping expand this query for an MIT course retrieval system. Here is exactly how retrieval works:
             1. Exact course numbers (e.g. "18.01", "6.1010") guarantee that specific course is returned — only include course numbers you are CERTAIN about
             2. Department names/numbers trigger dept filtering (e.g. "economics course 14", "math course 18")
-            3. Exact attribute keywords trigger hard filters: CI-H, CI-M, HASS-H, HASS-A, HASS-S, HASS-E, HASS-AH, REST
+            3. Exact attribute keywords trigger hard filters: CI-H, CI-M, HASS-H, HASS-A, HASS-S, HASS-E, HASS-AH, REST.
             4. "no prerequisites" triggers a no-prereq filter
             5. All other terms are used for semantic similarity matching against course titles and descriptions
 
@@ -53,7 +57,8 @@ class Chatbot:
             - If the query mentions specific course numbers, keep them exactly and focus expansion on related concepts and follow-on courses
             - If the query is about comparing courses (e.g. "difference between X and Y"), keep both course numbers and add descriptive terms about what each course covers — do NOT add unrelated course numbers
             - If the query is vague (e.g. "intro econ"), add the department name/number, likely course numbers, and relevant description terms
-            - If the query already has attribute keywords (CI-H, HASS-S etc.), preserve them exactly
+            - If the query already has attribute keywords (CI-H, HASS-S etc.), preserve them exactly. Only include these filters if the user asks for them explicitly.
+            - If the current message changes topic (e.g. from CS to economics), expand based on the new topic only
             - NEVER invent course numbers you are not certain about
             - NEVER add course numbers from a different department than what was asked about
 
@@ -73,7 +78,7 @@ class Chatbot:
         expanded = response.choices[0].message.content.strip()
         return expanded
 
-    DEBUG_BOOL = False
+    DEBUG_BOOL = True
     def format_prompt(self, user_input: str, history: list, debug = DEBUG_BOOL) -> list:
         expanded_query = self.expand_query(user_input, history)
         if debug:
@@ -85,7 +90,10 @@ class Chatbot:
         k = max(20, len(mentioned) * 6) if mentioned else 25
 
         courses = self.retriever.retrieve(expanded_query, k=k)
-
+        if not courses:
+            print("DEBUG: expansion produced no results, falling back to raw query")
+            courses = self.retriever.retrieve(user_input, k=k)
+            courses = [c for c in courses]
         course_context = "\n\n".join(courses) if courses else "No course data retrieved."
 
         messages = [
@@ -108,9 +116,12 @@ class Chatbot:
         if isinstance(content, list):
             content = " ".join(block.get("text", "") for block in content if isinstance(block, dict))
         elif isinstance(content, str) and content.startswith("[{"):
-            # API sometimes returns a stringified list of content blocks.
-            # Use regex to extract all 'text' values — robust to apostrophes.
-            texts = re.findall(r"'text':\s*'(.*?)'(?=\s*,\s*'type')", content, re.DOTALL)
-            if texts:
-                content = " ".join(texts)
+            try:
+                blocks = ast.literal_eval(content)
+                if isinstance(blocks, list):
+                    content = " ".join(b.get("text", "") for b in blocks if isinstance(b, dict))
+            except Exception:
+                # fallback: strip the wrapper manually
+                content = re.sub(r"^\[\{.*?'text':\s*'", "", content, flags=re.DOTALL)
+                content = re.sub(r"',\s*'type':.*?\}\]$", "", content, flags=re.DOTALL)
         return content.replace('\\n', '\n').strip()
