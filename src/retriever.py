@@ -152,7 +152,7 @@ class Retriever:
         q = query.lower()
 
         required_attrs = set()
-        if re.search(r'\bhass\b', q):
+        if re.search(r'\bhass\b(?![-\s](?:h|a|s|e)\b)', q):
             required_attrs |= HASS_ATTRS
         for attr, patterns in ATTRIBUTE_PATTERNS.items():
             if any(re.search(p, q) for p in patterns):
