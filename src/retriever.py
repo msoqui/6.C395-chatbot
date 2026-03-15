@@ -34,6 +34,29 @@ ATTRIBUTE_PATTERNS = {
 }
 HASS_ATTRS = {"HASS-H", "HASS-A", "HASS-S", "HASS-E", "HASS-AH"}
 
+DEPT_ALIASES = {
+    "1":  ["civil engineering", "civil", "env engineering"],
+    "2":  ["mechanical engineering", "mechanical", "mech e", "meche"],
+    "3":  ["materials science", "materials", "dmse"],
+    "4":  ["architecture", "arch"],
+    "5":  ["chemistry", "chem"],
+    "6":  ["computer science", "cs", "electrical engineering", "ee", "eecs", "course 6"],
+    "7":  ["biology", "bio"],
+    "8":  ["physics"],
+    "9":  ["brain", "cognitive science", "cogsci", "neuroscience", "bcs"],
+    "10": ["chemical engineering", "cheme"],
+    "11": ["urban planning", "urban studies", "planning"],
+    "12": ["earth science", "atmospheric science", "oceanography"],
+    "14": ["economics", "econ"],
+    "15": ["management", "business", "sloan"],
+    "16": ["aerospace", "aero", "astro"],
+    "17": ["political science", "poli sci", "polisci"],
+    "18": ["mathematics", "math", "maths"],
+    "20": ["biological engineering", "be"],
+    "21": ["humanities"],
+    "22": ["nuclear engineering", "nuclear"],
+    "24": ["philosophy", "linguistics"],
+}
 
 def _build_reverse_prereqs(courses: list) -> dict:
     """Map each course number to the list of courses that require it."""
@@ -124,7 +147,7 @@ class Retriever:
     def _extract_filters(self, query: str):
         """
         Returns (required_attrs, dept_prefix, no_prereqs).
-        dept_prefix only set on explicit "course N" mentions, not bare course numbers.
+        dept_prefix only set on explicit "course N" mentions (or aliases to a dept, e.g. 'math' : 18), not bare course numbers.
         """
         q = query.lower()
 
@@ -139,6 +162,11 @@ class Retriever:
         dept_match = re.search(r'\bcourse\s+(\d+)\b', q)
         if dept_match:
             dept_prefix = dept_match.group(1) + "."
+        else:
+            for dept_num, aliases in DEPT_ALIASES.items():
+                if any(alias in q for alias in aliases):
+                    dept_prefix = dept_num + "."
+                    break
 
         no_prereqs = bool(re.search(r'\bno\s+pre\w*\b|\bwithout\s+pre\w*\b', q))
 
@@ -185,11 +213,16 @@ class Retriever:
         _, raw_indices = self.index.search(query_vec, search_n)
 
         # Step 4: post-filter and split into dept-preferred vs rest
+        query_wants_special = "special subject" in query.lower()
         preferred, others = [], []
         for idx in raw_indices[0]:
             if idx in seen or idx >= len(self.courses):
                 continue
             c = self.courses[idx]
+            # Filter out vague placeholder courses unless explicitly asked for
+            if not query_wants_special:
+                if "Special Subject" in c.get("title", "") or "ad hoc basis" in c.get("description", ""):
+                    continue
             attrs = set(c.get("attributes", []))
             prereq = (c.get("prereqs") or "None").strip()
 
@@ -203,12 +236,7 @@ class Retriever:
             else:
                 others.append(idx)
 
-        # Dept is a soft preference: fill up to half slots from preferred dept
-        if dept_prefix and preferred:
-            half = max(remaining // 2, 1)
-            ordered = preferred[:half] + others[:remaining]
-        else:
-            ordered = (preferred + others)
+        ordered = (preferred + others)
 
         for idx in ordered[:remaining]:
             if idx not in seen:
