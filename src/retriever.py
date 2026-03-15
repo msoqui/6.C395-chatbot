@@ -3,10 +3,11 @@ src/retriever.py — FAISS-based course retriever with attribute/department pre-
 
 Retrieval strategy per query:
 1. Exact-match any course numbers mentioned (guaranteed inclusion)
-2. Broad semantic search over the full pre-built FAISS index
-3. Post-filter results by attributes (CI-H, HASS-*, REST), no-prereqs constraint
-4. Dept prefix (e.g. "Course 6") is a soft preference: fills half the slots first
-5. Merge exact matches + filtered semantic results, cap at k
+2. Retrieve follow-on courses that require any mentioned course number
+3. Broad semantic search over the full pre-built FAISS index
+4. Post-filter by attributes (CI-H, HASS-*, REST), no-prereqs, special subject constraints
+5. Dept prefix is a hard preference: preferred dept fills slots first, others as fallback
+6. Rerank final results using a cross-encoder for relevance scoring
 """
 
 import json
@@ -15,7 +16,7 @@ import re
 
 import faiss
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 DATA_PATH  = os.path.join(os.path.dirname(__file__), "..", "data", "courses.json")
@@ -106,6 +107,7 @@ class Retriever:
 
         print(f"Loading embedding model ({MODEL_NAME})...")
         self.model = SentenceTransformer(MODEL_NAME)
+        self.reranker = CrossEncoder('cross-encoder/ms-marco-TinyBERT-L-2-v2')
 
         if os.path.exists(index_path):
             print("Loading cached FAISS index...")
@@ -209,7 +211,7 @@ class Retriever:
         # Step 3: broad semantic search over the full pre-built index
         query_vec = np.array(self.model.encode([query]), dtype="float32")
         faiss.normalize_L2(query_vec)
-        search_n = min(k * 15, len(self.courses))  # cast a wide net, then filter
+        search_n = min(k * 30, len(self.courses))  # cast a wide net, then filter
         _, raw_indices = self.index.search(query_vec, search_n)
 
         # Step 4: post-filter and split into dept-preferred vs rest
@@ -243,6 +245,9 @@ class Retriever:
                 results.append(self._format_course(self.courses[idx]))
                 seen.add(idx)
 
+        if len(results) > 1:
+            scores = self.reranker.predict([(query, r) for r in results])
+            results = [r for _, r in sorted(zip(scores, results), reverse=True)]
         return results
 
 
