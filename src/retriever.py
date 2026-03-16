@@ -206,7 +206,10 @@ class Retriever:
 
         no_prereqs = bool(re.search(r'\bno\s+pre\w*\b|\bwithout\s+pre\w*\b', q))
 
-        return required_attrs, dept_prefix, no_prereqs, schedule_day
+        fall_only = bool(re.search(r'\bfall\b', q))
+        spring_only = bool(re.search(r'\bspring\b', q))
+
+        return required_attrs, dept_prefix, no_prereqs, fall_only, spring_only, schedule_day
 
     def retrieve(self, query: str, k: int = 10) -> list[str]:
         """
@@ -240,7 +243,7 @@ class Retriever:
             return results
 
         # Step 2: extract filters
-        required_attrs, dept_prefix, no_prereqs, schedule_day = self._extract_filters(query)
+        required_attrs, dept_prefix, no_prereqs, fall_only, spring_only, schedule_day = self._extract_filters(query)
 
         # Step 3: broad semantic search over the full pre-built index
         query_vec = np.array(self.model.encode([query]), dtype="float32")
@@ -267,6 +270,10 @@ class Retriever:
             if no_prereqs and prereq.lower() not in ("none", ""):
                 continue
             if schedule_day and schedule_day not in c.get('schedule', ''):
+                continue
+            if fall_only and "fall" not in attrs:
+                continue
+            if spring_only and "spring" not in attrs:
                 continue
 
             if dept_prefix and c["number"].startswith(dept_prefix):
