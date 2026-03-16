@@ -193,7 +193,74 @@ def parse_department_page(html):
 
     return courses
 
+def fetch_hydrant_data():
+    """Fetch schedule and rating data from Hydrant."""
+    resp = requests.get("https://hydrant.mit.edu/latest.json", timeout=20)
+    data = resp.json()
+    return data.get("classes", {})
 
+def decode_schedule(raw_sections: list) -> str:
+    """
+    Decode Hydrant raw section strings.
+    Format: "room/days/isEvening/times"
+    Days: M=Mon, T=Tue, W=Wed, R=Thu, F=Fri
+    times: human-readable time string like "1-2" or "11"
+    """
+    if not raw_sections or raw_sections == ["TBA"]:
+        return "TBA"
+
+    DAY_MAP = {"M": "Mon", "T": "Tue", "W": "Wed", "R": "Thu", "F": "Fri"}
+    schedules = []
+
+    for raw in raw_sections:
+        parts = raw.split("/")
+        if len(parts) < 4:
+            continue
+        room = parts[0]
+        days_str = parts[1]
+        is_evening = parts[2] == "1"
+        times = parts[3]
+
+        days = "".join(DAY_MAP.get(d, d) for d in days_str)
+
+        if is_evening:
+            schedules.append(f"{days} EVE ({times}) ({room})")
+        else:
+            schedules.append(f"{days} {times} ({room})")
+
+    return "; ".join(schedules) if schedules else "TBA"
+
+GIR_MAP = {
+    "CAL1": "Calculus I (GIR)",
+    "CAL2": "Calculus II (GIR)", 
+    "PHY1": "Physics I (GIR)",
+    "PHY2": "Physics II (GIR)",
+    "CHEM": "Chemistry (GIR)",
+    "BIO":  "Biology (GIR)",
+    "REST": "REST (GIR)",
+}
+
+def merge_hydrant(courses, hydrant_data):
+    """Merge Hydrant data into scraped courses."""
+    matched = 0
+    for course in courses:
+        num = course['number']
+        # Try exact match first, then without [J] suffix
+        h = hydrant_data.get(num) or hydrant_data.get(num.replace('[J]', '').strip())
+        if h:
+            matched += 1
+            course['schedule'] = decode_schedule(h.get('lectureRawSections', []))
+            course['instructors'] = h.get('inCharge', '')
+            course['rating'] = h.get('rating')
+            course['hours'] = h.get('hours')
+            course['enrollment'] = h.get('size')
+            course['level'] = 'undergrad' if h.get('level') == 'U' else 'graduate'
+            gir = h.get('gir', '')
+            if gir and gir in GIR_MAP:
+                if GIR_MAP[gir] not in course['attributes']:
+                    course['attributes'].append(GIR_MAP[gir])
+    print(f"Hydrant matched {matched}/{len(courses)} courses")
+    return courses
 # ---------------------------------------------------------------------------
 # Main scraper
 # ---------------------------------------------------------------------------
@@ -238,6 +305,10 @@ def scrape_all(output_path='data/courses.json', delay=0.5):
 
         print(f"  {dept}: {added} new courses (total: {len(all_courses)})")
         time.sleep(delay)
+
+    print("Fetching Hydrant data...")
+    hydrant_data = fetch_hydrant_data()
+    all_courses = merge_hydrant(all_courses, hydrant_data)
 
     # --- Write output ---
     with open(output_path, 'w', encoding='utf-8') as f:

@@ -32,6 +32,12 @@ ATTRIBUTE_PATTERNS = {
     "HASS-AH":       [r'\bhass-ah\b', r'\bhass ah\b'],
     "REST":          [r'\brest\b', r'\bscience requirement\b'],
     "Institute-Lab": [r'\binstitute.?lab\b', r'\blab requirement\b'],
+    "Calculus I (GIR)":  [r'\bcalculus\s+i\s+gir\b', r'\bcal1\b'],
+    "Calculus II (GIR)": [r'\bcalculus\s+ii\s+gir\b', r'\bcal2\b'],
+    "Physics I (GIR)":   [r'\bphysics\s+i\s+gir\b', r'\bphy1\b'],
+    "Physics II (GIR)":  [r'\bphysics\s+ii\s+gir\b', r'\bphy2\b'],
+    "Chemistry (GIR)":   [r'\bchemistry\s+gir\b', r'\bchem\s+gir\b'],
+    "Biology (GIR)":     [r'\bbiology\s+gir\b', r'\bbio\s+gir\b'],
 }
 HASS_ATTRS = {"HASS-H", "HASS-A", "HASS-S", "HASS-E", "HASS-AH"}
 
@@ -57,6 +63,7 @@ DEPT_ALIASES = {
     "21": ["humanities"],
     "22": ["nuclear engineering", "nuclear"],
     "24": ["philosophy", "linguistics"],
+    "gir": ["gir", "general institute requirement", "calculus gir", "physics gir", "chemistry gir", "biology gir"],
 }
 
 def _build_reverse_prereqs(courses: list) -> dict:
@@ -70,14 +77,22 @@ def _build_reverse_prereqs(courses: list) -> dict:
     return reverse
 
 
-def _course_to_text(course: dict, required_by: list = None) -> str:
-    """Text blob used for embedding — richer = better retrieval."""
+def _course_to_text(course, required_by=None):
     attrs = ", ".join(course.get("attributes", []))
+    schedule = course.get('schedule', '')
+    instructors = course.get('instructors', '')
+    rating = f"{course['rating']:.1f}/7.0" if course.get('rating') else ''
+    hours = f"{course['hours']:.1f} hrs/week" if course.get('hours') else ''
+    enrollment = f"Avg enrollment: {course['enrollment']:.0f}" if course.get('enrollment') else ''
+
     text = (
         f"{course['number']} {course['title']}. "
         f"Units: {course.get('units', '')}. "
         f"Prereqs: {course.get('prereqs', 'None')}. "
         f"Attributes: {attrs}. "
+        f"Schedule: {schedule}. "
+        f"Instructors: {instructors}. "
+        f"Rating: {rating}. Hours: {hours}. Enrollment: {enrollment}. "
         f"{course.get('description', '')}"
     )
     if required_by:
@@ -133,14 +148,21 @@ class Retriever:
             variants.append(stripped)
         return variants
 
-    def _format_course(self, c: dict) -> str:
+    def _format_course(self, c):
         attrs = ", ".join(c.get("attributes", []))
         prereq = (c.get("prereqs") or "None").strip()
         prereq_is_none = prereq.lower() in ("none", "")
-        level = "Entry-level (no prerequisites)" if prereq_is_none else "Requires prior coursework — must complete prerequisites first"
+        level = "Entry-level (no prerequisites)" if prereq_is_none else "Requires prior coursework"
+        rating = f"{c['rating']:.1f}/7.0" if c.get('rating') else 'N/A'
+        hours = f"{c['hours']:.1f} hrs/week" if c.get('hours') else 'N/A'
+        enrollment = f"{c['enrollment']:.0f} students" if c.get('enrollment') else 'N/A'
+        
         return (
             f"Course {c['number']}: {c['title']}\n"
             f"  LEVEL: {level}\n"
+            f"  Schedule: {c.get('schedule', 'See catalog')}\n"
+            f"  Instructors: {c.get('instructors', 'Staff')}\n"
+            f"  Rating: {rating} | Avg hours: {hours} | Avg enrollment: {enrollment}\n"
             f"  Prerequisites: {prereq}\n"
             f"  Units: {c.get('units', 'N/A')} | Attributes: {attrs}\n"
             f"  Description: {c.get('description', '')}"
@@ -170,9 +192,21 @@ class Retriever:
                     dept_prefix = dept_num + "."
                     break
 
+        days_map = {
+        "monday": "Mon", "tuesday": "Tue", "wednesday": "Wed",
+        "thursday": "Thu", "friday": "Fri",
+        "mon": "Mon", "tue": "Tue", "wed": "Wed", "thu": "Thu", "fri": "Fri",
+        "mwf": "Mon", "tr": "Tue",  # common MIT schedule patterns
+            }
+        schedule_day = None
+        for day_str, day_code in days_map.items():
+            if day_str in q:
+                schedule_day = day_code
+                break
+
         no_prereqs = bool(re.search(r'\bno\s+pre\w*\b|\bwithout\s+pre\w*\b', q))
 
-        return required_attrs, dept_prefix, no_prereqs
+        return required_attrs, dept_prefix, no_prereqs, schedule_day
 
     def retrieve(self, query: str, k: int = 10) -> list[str]:
         """
@@ -206,7 +240,7 @@ class Retriever:
             return results
 
         # Step 2: extract filters
-        required_attrs, dept_prefix, no_prereqs = self._extract_filters(query)
+        required_attrs, dept_prefix, no_prereqs, schedule_day = self._extract_filters(query)
 
         # Step 3: broad semantic search over the full pre-built index
         query_vec = np.array(self.model.encode([query]), dtype="float32")
@@ -231,6 +265,8 @@ class Retriever:
             if required_attrs and not (required_attrs & attrs):
                 continue
             if no_prereqs and prereq.lower() not in ("none", ""):
+                continue
+            if schedule_day and schedule_day not in c.get('schedule', ''):
                 continue
 
             if dept_prefix and c["number"].startswith(dept_prefix):
