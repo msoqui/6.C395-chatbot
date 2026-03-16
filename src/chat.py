@@ -79,7 +79,7 @@ class Chatbot:
         expanded = response.choices[0].message.content.strip()
         return expanded
 
-    DEBUG_BOOL = True
+    DEBUG_BOOL = False
     def format_prompt(self, user_input: str, history: list, debug = DEBUG_BOOL) -> list:
         expanded_query = self.expand_query(user_input, history)
         if debug:
